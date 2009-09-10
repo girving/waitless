@@ -1,0 +1,50 @@
+#!/bin/bash
+
+# Make sure we're where we think we are
+cd `dirname $0`
+
+CC=gcc
+CFLAGS='-O2 -Wall -Werror -fvisibility=hidden'
+PREFIX=`/bin/pwd`
+
+if [ `uname` == "Darwin" ]; then
+    SO=dylib
+    SED=gsed
+else
+    SO=so
+    SED=sed
+fi
+
+run () { echo $*; $*; }
+compile () { run $CC $CFLAGS $*; }
+link () { run $CC $*; }
+
+if [ $1 == "clean" ]; then
+    run rm -f *.o *.$SO waitless config.h hacked-stat.h
+    exit
+fi
+
+echo "#define PREFIX \"$PREFIX\"" > config.h
+
+if [ `uname` == "Darwin" ]; then
+    # Mac OS X doesn't provide bits/stat.h, so we have to make one by ourselves
+    # by removing the system call signatures from sys/stat.h.  Conveniently,
+    # there's a __BEGIN_DECLS/__END_DECLS block around exactly these for C++
+    # compatibility, so all we have to do is torch that block:
+    sed 's/__BEGIN_DECLS/#if 0/;s/__END_DECLS/#endif/' /usr/include/sys/stat.h > hacked-stat.h
+fi
+
+# Build object files
+CORE='util action fd_map state shared_map hash skein skein_block'
+for src in waitless stubs $CORE; do
+    compile -c $src.c
+done
+COREO=`echo $CORE | $SED 's/\>/.o/g'`
+
+# Build waitless
+compile -c -DPRELOAD=0 real_call.c -o real_call-bin.o
+compile -o waitless waitless.o real_call-bin.o $COREO
+
+# Build libwaitless.so
+compile -c -DPRELOAD=1 real_call.c -o real_call-lib.o
+link -shared -o libwaitless.$SO stubs.o real_call-lib.o $COREO

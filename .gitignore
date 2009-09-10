@@ -1,0 +1,6 @@
+*.o
+*.so
+*.dylib
+config.h
+waitless
+hacked-stat.h

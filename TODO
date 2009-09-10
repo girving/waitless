@@ -1,0 +1,6 @@
+Possible improvements:
+
+1. Fixpoint iteration: In order to handle latex, waitless can be told do iterate
+   the computation until it converges.  Normally this process would never
+   converge due to timestamps, but we can solve that by freezing timestamps at
+   the beginning of the fixpoint iteration processes.
