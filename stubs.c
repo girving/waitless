@@ -293,7 +293,6 @@ FILE *fopen(const char *path, const char *mode)
     if (flags & O_WRONLY)
         action_open_write(path);
     else { // O_RDONLY
-        flags = O_RDONLY;
         if (!action_open_read(path)) {
             // File does not exist, no need to call fopen.
             errno = ENOENT;
