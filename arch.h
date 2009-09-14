@@ -1,26 +1,20 @@
-// Architecture specific stuff
+// Architecture specific types
 
 #ifndef __arch_h__
 #define __arch_h__
 
 /*
- * All of the types declared here can be found in standard header files.
- * However, these standard headers declare a slew of things we don't want.
- * It's much better to duplicate a handful of lines of code here than to
- * sacrifice compiler checking of name usage.
+ * These includes are chosen to avoid pulling in any function signatures.
+ * All we want is data types and macros.
+ *
+ * Other files should include arch.h if possible rather than the system
+ * header in order to reduce the chance of leakage.
  */
 
 #include <stdint.h>
+#include <stddef.h>
 #include <sys/types.h>
 #include <sys/syslimits.h>
-
-// TODO: This assumes sizeof(long) == sizeof(void*).
-typedef unsigned long size_t;
-typedef long ssize_t;
-
-#ifndef NULL
-#define NULL ((void *)0)
-#endif
 
 // Pull in struct stat and surrounding defines without pulling in the system
 // call signatures.
