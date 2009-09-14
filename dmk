@@ -48,3 +48,7 @@ compile -o waitless waitless.o real_call-bin.o $COREO
 # Build libwaitless.so
 compile -c -DPRELOAD=1 real_call.c -o real_call-lib.o
 link -shared -o libwaitless.$SO stubs.o real_call-lib.o $COREO
+
+# Build a test program
+compile -c tests/read.c -o tests/read.o
+link -o tests/read tests/read.o

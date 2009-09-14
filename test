@@ -1,0 +1,5 @@
+#!/bin/bash
+
+cd `dirname $0`/tests
+#../waitless ./simple
+../waitless ./read
