@@ -45,6 +45,13 @@ typedef struct FILE FILE;
 #define O_EXCL     0x0800
 #define O_EVTONLY  0x8000
 
+// See fcntl.h or man fcntl
+#define F_DUPFD 0
+#define F_GETFD 1
+#define F_SETFD 2
+#define F_GETFL 3
+#define F_SETFL 4
+
 // See sys/mman.h or man mmap
 #define PROT_NONE  0x00
 #define PROT_READ  0x01
@@ -69,13 +76,18 @@ typedef struct FILE FILE;
 // Declare system call wrappers
 extern int real_open(const char *path, int flags, mode_t mode);
 extern int real_close(int fd);
+extern int real_pipe(int fds[2]);
+extern int real_dup(int fd);
+extern int real_dup2(int fd, int fd2);
+extern int real_fcntl(int fd, int cmd, long extra);
 extern int real_lstat(const char *path, struct stat *buf);
 extern int real_stat(const char *path, struct stat *buf);
 extern int real_fstat(int fd, struct stat *buf);
 extern int real_access(const char *path, int amode);
+extern int real_chdir(const char *path);
 extern pid_t real_fork(void);
 extern pid_t real_vfork(void);
-extern int real_execve(const char *path, char *const argv[], char *const envp[]);
+extern int real_execve(const char *path, const char *const argv[], const char *const envp[]);
 extern pid_t real_wait(int *status);
 extern pid_t real_wait3(int *status, int options, struct rusage *rusage);
 extern pid_t real_wait4(pid_t pid, int *status, int options, struct rusage *rusage);
@@ -92,6 +104,9 @@ extern int inside_libc;
 // this lets us avoid executing waitless logic twice.
 extern FILE *real_fopen(const char *path, const char *mode);
 extern int real_fclose(FILE *stream);
+extern void real_exit(int status) __attribute__((noreturn));
+extern char *real_getcwd(char *buf, size_t n);
+extern int real_mkstemp(char *template);
 
 // These functions are not intercepted, so we declare them directly.  As they
 // become intercepted in future, their names will change to start with real_.
@@ -102,10 +117,14 @@ extern off_t lseek(int fd, off_t offset, int whence);
 extern void *dlsym(void* handle, const char* symbol);
 extern char *getenv(const char *name);
 extern int setenv(const char *name, const char *value, int overwrite);
+extern int unsetenv(const char *name);
 extern void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset);
 extern int mkdir(const char *path, mode_t mode);
 extern int mkstemp(char *template);
-extern int execvp(const char *file, char *const argv[]);
 extern int unlink(const char *path);
+extern int ftruncate(int fd, off_t length);
+extern int getpid(void);
+extern int kill(pid_t pid, int signal);
+extern int fflush(FILE *stream);
 
 #endif

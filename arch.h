@@ -29,4 +29,17 @@
 #   undef _SYS_STAT_H // unlie
 #endif
 
+// Pull in WIFEXITED, etc. without pulling in system call signatures
+#include "hacked-wait.h"
+
+// The 64-bit versions of stat/fstat/lstat have weird suffixes on Mac for
+// backwards compatibility reasons.
+#ifdef __APPLE__
+#define STAT_NAME(name) #name __DARWIN_SUF_64_BIT_INO_T
+#define STAT_ALIAS(name) __asm("_" STAT_NAME(name))
+#else
+#define STAT_NAME(name) #name
+#define STAT_ALIAS(name)
+#endif
+
 #endif

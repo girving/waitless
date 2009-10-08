@@ -4,3 +4,9 @@ Possible improvements:
    the computation until it converges.  Normally this process would never
    converge due to timestamps, but we can solve that by freezing timestamps at
    the beginning of the fixpoint iteration processes.
+
+2. Better symlink support.  Currently we ignore symlinks, which means that for
+   reading symlinks are equivalent to copies of files.  Unfortunately, it also
+   means that waitless will break if the same file is written simultaneously
+   through different symlinks.  This is similar to the problem of untracked
+   processes, and could possibly be handled with the same means.

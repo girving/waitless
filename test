@@ -1,5 +1,9 @@
 #!/bin/bash
 
-cd `dirname $0`/tests
+set -e
+run () { set -e; echo $*; $*; }
+
+run cd `dirname $0`/tests
 #../waitless ./simple
-../waitless ./read
+run ../waitless -d
+run ../waitless -v ./read

@@ -5,14 +5,15 @@
 #include "fd_map.h"
 #include "action.h"
 #include "real_call.h"
+#include "inverse_map.h"
+#include "search_path.h"
 
 /*
  * READ THIS FIRST:
- * 
- * In order to preserve our sanity, this file contains little actual logic.
- * Instead, it maps the vast complexity zoo that is system calls into the
- * much simpler model in action.c.  Start in action.c if you're reading this
- * for the first time.
+ *
+ * For simplicity, this file contains little actual logic.  Instead, it maps
+ * the vast complexity zoo that is system calls into the much simpler model
+ * in action.c.  Start in action.c if you're reading this for the first time.
  *
  * Now for a few comments:
  */
@@ -81,6 +82,9 @@
  *
  *    We'll need to go through all the calls to real_* and make sure
  *    each one treats each failure appropriately.
+ *
+ * 4. errno is not necessarily preserved by action_ or other calls, which might
+ *    result in weird errno values when system calls fail.
  */
 
 /*
@@ -94,7 +98,7 @@
  * we'll be able to check these assumptions.
  *
  * There are two classes of important system calls:
- * 
+ *
  * 1. File IO: We track any system call that touches a filesystem path in
  *    preparation for (or conclusion of) reading and writing:
  *
@@ -102,16 +106,17 @@
  *        stat, lstat, access
  *        chdir, rename, truncate
  *
- *    TODO: ...plus their libc equivalents:
+ *    plus their libc equivalents:
  *
  *        fopen, fdopen, freopen, fclose, fcloseall
  *
  *    We _do not_ track calls which read or write data through file
- *    descriptors.  Instead, we imagine that when a process opens a file
- *    for reading it instantly learns the entire contents of the file.
- *    Contravariantly, we imagine that when a process closes a file it
- *    instantly rewrites the entire file.  These conservative assumptions
- *    avoid the need to track each individual read and write.
+ *    descriptors (or use fstat to grab information about them)  Instead, we
+ *    imagine that when a process opens a file for reading it instantly learns
+ *    the entire contents of the file.  Contravariantly, we imagine that when
+ *    a process closes a file it instantly rewrites the entire file.  These
+ *    conservative assumptions avoid the need to track each individual read
+ *    and write.
  *
  *    TODO: For processes that read or write files in pleasant linear fashion,
  *    it is possible to feed the data streams through our hash directly,
@@ -136,7 +141,7 @@
  *    problem if we later read the same file, but otherwise there is nothing to
  *    do.  The snapshot guarantee is that all processes under waitless see the
  *    same version of every file, NOT that these versions are available to the
- *    user at any later time.
+ *    user at any later time.  TODO: make sure we do the final fstat check
  *
  *    If waitless is run on top of another build system, the child system will
  *    probably try to use stat or lstat to determine whether files need to be
@@ -197,6 +202,12 @@
  *
  *        pipe, dup, dup2, fcntl
  *
+ *    In order to do (b), we need the ability to share the "parents" variable
+ *    in action.c between two kernel processes in order to treat them as the
+ *    same "waitless" process.  Probably the best way is a shared mmap'ed
+ *    region, or maybe SYSV shared memory.  We could communicate the information
+ *    through environment variables if exec would normally strip it.
+ *
  * 7. Ownership: chown, fchown
  *
  * 8. TODO: Directory related system calls:
@@ -218,21 +229,23 @@
  * 13. TODO: temporary file creation:
  *
  *         mkdtemp, mkstemps, mkstemp, mktemp
+ *
+ * 14. TODO: SYSV shared memory.  Processes potentially linked by shared memory
+ *     segments should have their subgraph nodes interleaved.
+ *
+ *         shmget, shmat, shmdt, shmctl
  */
 
-static const int required_open_flags = O_CREAT | O_TRUNC;
-static const int disallowed_open_flags = O_APPEND | O_EXCL | O_EVTONLY;
-
-static void bad_open_flags(int flags) __attribute__((noreturn));
-static void bad_open_flags(int flags)
+static void bad_open_flags(const char *path, int flags) __attribute__((noreturn));
+static void bad_open_flags(const char *path, int flags)
 {
     const char *s = NULL;
-    if (flags & O_APPEND)   s = "O_APPEND is currently disallowed for open";
-    if (!(flags & O_CREAT)) s = "O_CREAT is currently required for open";
-    if (!(flags & O_TRUNC)) s = "O_TRUNC is currently required for open";
-    if (flags & O_EXCL)     s = "O_EXCL is currently disallowed for open";
-    if (flags & O_EVTONLY)  s = "O_EVTONLY is currently disallowed for open";
-    die(s);
+    if (flags & O_APPEND)   s = "O_APPEND is currently disallowed";
+    if (flags & O_EXCL)     s = "O_EXCL is currently disallowed";
+    if (flags & O_EVTONLY)  s = "O_EVTONLY is currently disallowed";
+    if (!(flags & O_CREAT)) s = "O_CREAT is required for writing";
+    if (!(flags & O_TRUNC)) s = "O_TRUNC is required for writing";
+    die("open(\"%s\", 0x%x): %s", path, flags, s);
 }
 
 // Set visibility to default for all the stubs.
@@ -245,17 +258,30 @@ static void bad_open_flags(int flags)
  */
 int open(const char *path, int flags, mode_t mode)
 {
-    int inside_libc_save = inside_libc;
-    if (!inside_libc_save) {
+    int ignore = inside_libc;
+    if (startswith(path, "/dev/"))
+        ignore = 1;
+
+    struct hash path_hash;
+    int adjusted_flags = flags;
+    if (!ignore) {
         // TODO: deal with O_NOFOLLOW and O_SYMLINK
-        if ((flags & (required_open_flags | disallowed_open_flags)) ^ required_open_flags)
-            bad_open_flags(flags);
+        if (flags & (O_APPEND | O_EXCL | O_EVTONLY))
+            bad_open_flags(path, flags);
         if (flags & O_RDWR)
             NOT_IMPLEMENTED("O_RDWR");
-        if (flags & O_WRONLY)
-            action_open_write(path);
+        remember_hash_path(&path_hash, path);
+        if (flags & O_WRONLY) {
+            if (~flags & (O_CREAT | O_TRUNC))
+                bad_open_flags(path, flags);
+            action_open_write(path, &path_hash);
+            // Open read/write so that we can compute the file's hash upon
+            // close.  TODO: Remove this if we compute hashes by intercepting
+            // write() calls.
+            adjusted_flags ^= O_RDWR | O_WRONLY;
+        }
         else { // O_RDONLY
-            if (!action_open_read(path)) {
+            if (!action_open_read(path, &path_hash)) {
                 // File does not exist, no need to call open.
                 errno = ENOENT;
                 return -1;
@@ -263,20 +289,18 @@ int open(const char *path, int flags, mode_t mode)
         }
     }
 
-    int fd = real_open(path, flags, mode);
+    int fd = real_open(path, adjusted_flags, mode);
 
-    if (!inside_libc_save) {
-        if (fd >= MAX_FDS)
-            die("got fd %d > %d", fd, MAX_FDS);
-        else if (fd > 0)
-            fd_map_open(fd, flags);
+    if (!ignore) {
+        if (fd > 0) {
+            fd_map_open(fd, flags, &path_hash);
+        }
         else { // fd == -1
             if (flags & O_WRONLY)
-                action_close_write(NULL);
-            else
-                action_close_read(NULL);
+                action_close_write(0);
         }
     }
+
     return fd;
 }
 
@@ -285,15 +309,30 @@ int creat(const char *path, mode_t mode)
     return open(path, O_CREAT | O_TRUNC | O_WRONLY, mode);
 }
 
+// r+b is actually invalid, but in that case we fail only if fopen succeeds.
+// This works around an annoying property of gcc (since fixed):
+//     http://gcc.gnu.org/ml/gcc-patches/2009-09/msg01170.html
+static const char valid_modes[][4] = {"r", "w", "rb", "wb", "r+b", ""};
+
 FILE *fopen(const char *path, const char *mode)
 {
-    if (mode[1] == '+' || mode[0] == 'a')
-        die("unsupported fopen mode '%s'", mode);
+    int i;
+    for (i = 0; ; i++) {
+        if (!strcmp(valid_modes[i], mode))
+            break;
+        if (!valid_modes[i][0])
+            die("fopen(%s): unsupported mode '%s'", path, mode);
+    }
+
     int flags = mode[0] == 'w' ? O_WRONLY : O_RDONLY;
+    if (flags == O_WRONLY)
+        mode = "w+"; // Open read/write for hashing purposes
+    struct hash path_hash;
+    remember_hash_path(&path_hash, path);
     if (flags & O_WRONLY)
-        action_open_write(path);
+        action_open_write(path, &path_hash);
     else { // O_RDONLY
-        if (!action_open_read(path)) {
+        if (!action_open_read(path, &path_hash)) {
             // File does not exist, no need to call fopen.
             errno = ENOENT;
             return NULL;
@@ -303,16 +342,13 @@ FILE *fopen(const char *path, const char *mode)
     FILE *file = real_fopen(path, mode);
 
     if (!file) {
-        if (flags & O_WRONLY)
-            action_close_write(NULL);
-        else
-            action_close_read(NULL);
+        if (errno != ENOENT)
+            die("fopen(%s) failed: %s", path, strerror(errno));
     }
-    int fd = fileno(file);
-    if (fd >= MAX_FDS)
-        die("got fd %d > %d", fd, MAX_FDS);
-    else
-        fd_map_open(fd, flags);
+    else if (!strcmp(mode, "r+b"))
+        die("fopen(%s): mode r+b is unsupported unless file doesn't exist");
+
+    fd_map_open(fileno(file), flags | WO_FOPEN, &path_hash);
     return file;
 }
 
@@ -327,15 +363,14 @@ FILE *freopen(const char *path, const char *mode, FILE *stream)
 }
 
 /*
- * The close function is a cool example of contravariance.  If the file is open
- * for read, we call action_close_read before the close in order to use fstat
- * fstat to verify that the file hasn't changed.  In the case of write, we call
- * close before action_close_write so that errors detected on close manifest as
- * write errors.
+ * Both action_close_read and action_close_write are called before the actual
+ * close call in order to take advantage of the open file descriptor.  For read,
+ * we use fstat to verify that the file hasn't changed, and for write we reuse
+ * the file descriptor to compute the hash of the written file.
  *
- * TODO: There is an extremely dangerous race condition when writing a file.
+ * TODO: There is an unfortunate  race condition when writing a file.
  * We currently hash the output file after it is fully written, which means
- * that another process could modify the file between close and hash.  I believe
+ * that another process could modify the file before the close.  I believe
  * the only reliable way to avoid this race condition is to intercept the write
  * stream and compute the hash as the data is written out.  Happily, that's
  * something we want to do anyway.
@@ -348,44 +383,47 @@ FILE *freopen(const char *path, const char *mode, FILE *stream)
  */
 int close(int fd)
 {
-    struct fd_info *info;
-    int inside_libc_save = inside_libc;
-    if (!inside_libc_save) {
+    struct fd_info *info = 0;
+    if (!inside_libc) {
         info = fd_map_find(fd);
-        if (!info)
-            die("bad file descriptor in close");
-        if (!(info->flags & O_WRONLY)) // O_RDONLY
-            action_close_read(info);
+        if (info) {
+            if (info->count == 1 && !(info->flags & WO_PIPE)) {
+                if (info->flags & O_WRONLY)
+                    action_close_write(fd);
+            }
+            fd_map_close(fd);
+        }
     }
 
     int ret = real_close(fd);
 
-    if (!inside_libc_save) {
-        if (ret < 0)
-            die("error on close");
-        if (info->flags & O_WRONLY)
-            action_close_write(info);
-        fd_map_close(info);
-    }
+    if (info && ret < 0)
+        die("error on close(%d): %s", fd, strerror(errno));
+
     return ret;
 }
 
 int fclose(FILE *stream)
 {
+    int fd = fileno(stream);
     struct fd_info *info = fd_map_find(fileno(stream));
-    if (!info)
-        die("bad FILE* in fclose");
-    if (!(info->flags & O_WRONLY)) // O_RDONLY
-        action_close_read(info);
+    if (info) {
+        if (info->count == 1) {
+            if (info->flags & O_WRONLY) {
+                if (fflush(stream) < 0)
+                    die("fflush failed: %s", strerror(errno));
+                action_close_write(fd);
+            }
+        }
+        fd_map_close(fd);
+    }
 
     int ret = real_fclose(stream);
 
-    if (ret)
-        die("error on fclose");
-    if (info->flags & O_WRONLY)
-        action_close_write(info);
-    fd_map_close(info);
-    return 0;
+    if (info && ret < 0)
+        die("error on fclose(%d): %s", fd, strerror(errno));
+
+    return ret;
 }
 
 int fcloseall()
@@ -393,14 +431,80 @@ int fcloseall()
     NOT_IMPLEMENTED("fcloseall");
 }
 
-int fstat(int fd, struct stat *buf)
+/*
+ * Processes with pipes open are currently considered to share arbitrary
+ * information in both directions (i.e., the data and the direction are
+ * not tracked).  Therefore, pipe information is stored in the fd_map so
+ * that subsequent calls to fork/exec can check for existant pipes.  If any
+ * are found, the two process spines are joined (see action.c for details).
+ */
+int pipe(int fds[2])
 {
-    NOT_IMPLEMENTED("fstat");
+    int ret = real_pipe(fds);
+
+    if (!ret) {
+        struct hash zero;
+        memset(&zero, 0, sizeof(struct hash));
+        fd_map_open(fds[0], O_RDONLY | WO_PIPE, &zero);
+        fd_map_open(fds[1], O_WRONLY | WO_PIPE, &zero);
+    }
+
+    return ret;
 }
 
+int dup(int fd)
+{
+    // dup is easy to implement, but I don't understand how it can be
+    // meaningfully used by build processes, so die for now.
+    die("not implemented: dup(%d)", fd);
+/*
+    int fd2 = real_dup(fd);
+
+    if (fd2 > 0) {
+        struct fd_info *info = fd_map_find(fd);
+        if (info)
+            fd_map_open(fd2, info->flags, &info->path_hash);
+    }
+
+    return fd2;
+*/
+}
+
+int dup2(int fd, int fd2)
+{
+    // Call the close stub to avoid duplicating action logic.  This produces
+    // different behavior in the case where fd is not active.
+    close(fd2);
+
+    wlog("dup2(%d, %d)", fd, fd2);
+    int ret = real_dup2(fd, fd2);
+
+    if (ret > 0)
+        fd_map_dup2(fd, fd2);
+
+    return ret;
+}
+
+int fcntl(int fd, int cmd, long extra)
+{
+    wlog("fcntl(%d, %d, %ld)", fd, cmd, extra);
+
+    // Track close-on-exec flag
+    if (cmd == F_SETFD)
+        fd_map_set_cloexec(fd, extra & 1);
+
+    return real_fcntl(fd, cmd, extra);
+}
+
+// We do not need to intercept fstat since the necessary dependencies
+// are tracked through open and close.
+
+int lstat(const char *path, struct stat *buf) STAT_ALIAS(lstat);
 int lstat(const char *path, struct stat *buf)
 {
-    if (!action_lstat(path)) {
+    die("not implemented: lstat(\"%s\", ...)", path);
+
+    if (!inside_libc && !action_lstat(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -408,11 +512,12 @@ int lstat(const char *path, struct stat *buf)
     return real_lstat(path, buf);
 }
 
+int stat(const char *path, struct stat *buf) STAT_ALIAS(stat);
 int stat(const char *path, struct stat *buf)
 {
     // TODO: Don't pretend that lstat and stat are the same.  stat should be
     // modeled as the sequence of lstats that it is.
-    if (!action_lstat(path)) {
+    if (!inside_libc && !action_lstat(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -423,7 +528,7 @@ int stat(const char *path, struct stat *buf)
 int access(const char *path, int amode)
 {
     // TODO: make this the same as stat (i.e., not lstat)
-    if (!action_lstat(path)) {
+    if (!inside_libc && !action_lstat(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -432,7 +537,17 @@ int access(const char *path, int amode)
 
 int chdir(const char *path)
 {
-    NOT_IMPLEMENTED("chdir");
+    if (!action_lstat(path)) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    int ret = real_chdir(path);
+
+    if (ret < 0)
+        die("chdirs(\"%s\") failed: %s", path, strerror(errno)); 
+
+    return ret;
 }
 
 int fchdir(int fd)
@@ -452,54 +567,164 @@ int truncate(const char *path, off_t len)
 
 pid_t fork(void)
 {
-    NOT_IMPLEMENTED("fork");
-    return real_fork();
+    // action_fork calls real_fork internally
+    return action_fork();
 }
 
 pid_t vfork(void)
 {
-    NOT_IMPLEMENTED("vfork");
-    return real_vfork();
+    // We put nontrivial logic after fork, and cannot be bothered
+    // with the crippled semantics of vfork.
+    return fork();
 }
 
-int execve(const char *path, char *const argv[], char *const envp[])
+int execve(const char *path, const char *const argv[], char *const envp[])
 {
-    action_execve(path, argv, envp);
-    return real_execve(path, argv, envp);
+    action_execve(path, argv, (const char* const*)envp);
+    return real_execve(path, argv, (const char* const*)envp);
 }
 
-// TODO: Add stubs for system, execl, execle, execlp, execv, execvp, execvP
+#define MAX_ARGS 32
 
-pid_t wait(int *status)
+// COLLECT_ARGV intentionally leaves va_end responsibility to the caller
+#define COLLECT_ARGV() \
+    const char *argv[MAX_ARGS+1]; \
+    int i = 0; \
+    argv[i++] = arg; \
+    va_list ap; \
+    va_start(ap, arg); \
+    for(;; i++) { \
+        if (i > MAX_ARGS) \
+            die("exec* passed more than %d arguments", MAX_ARGS); \
+        argv[i] = va_arg(ap, char*); \
+        if (!argv[i]) \
+            break; \
+    }
+
+// Declare environ for use in non -e versions of exec
+#ifdef __APPLE__
+// Mac shared libraries have to get environ via _NSGetEnviron()
+extern char ***_NSGetEnviron(void);
+#define GET_ENVIRON() (*_NSGetEnviron())
+#else
+extern char *const *environ;
+#define GET_ENVIRON() environ
+#endif
+
+int execl(const char *path, const char *arg, ...)
 {
-    NOT_IMPLEMENTED("wait"); 
+    // Convert varargs into argv
+    COLLECT_ARGV();
+    va_end(ap);
+
+    return execve(path, argv, GET_ENVIRON());
 }
+
+int execle(const char *path, const char *arg, ... /*, char *const envp[]*/)
+{
+    // Convert varargs into argv and envp
+    COLLECT_ARGV();
+    char *const *envp = va_arg(ap, char *const *);
+    va_end(ap);
+
+    return execve(path, argv, envp);
+}
+
+int execv(const char *path, const char *const argv[])
+{
+    return execve(path, argv, GET_ENVIRON());
+}
+
+int execvP(const char *file, const char *PATH, const char *const argv[])
+{
+    // Normally execvP works by repeatedly calling execve for each component
+    // of the search path.  However, we'd prefer to call action_execve only
+    // once, so we use a bunch of stat calls instead (at the cost of one extra
+    // system call total).
+    char buffer[PATH_MAX];
+    file = search_path(buffer, file, PATH);
+    if (!file)
+        return -1;
+
+    return execve(file, argv, GET_ENVIRON());
+}
+
+int execvp(const char *file, char *const argv[])
+{
+    // Note: Passing null for PATH is correct only because we're calling our
+    // special version of execvP (which calls our version of search_path).
+    return execvP(file, 0, (const char *const *)argv);
+}
+
+int execlp(const char *file, const char *arg, ...)
+{
+    // Convert varargs into argv
+    COLLECT_ARGV();
+    va_end(ap);
+
+    return execvp(file, (char *const*)argv);
+}
+
+static const char signals[32][10] = {
+    "?", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "?",
+    "SIGFPE", "SIGKILL", "SIGBUS", "SIGSEGV", "SIGSYS", "SIGPIPE", "SIGALRM",
+    "SIGTERM", "SIGURG", "SIGSTOP", "SIGTSTP", "SIGCONT", "SIGCHLD", "SIGTTIN",
+    "SIGTTOU", "SIGID", "SIGXCPU", "SIGXFSZ", "SIGVTALRM", "SIGPROF",
+    "SIGWINCH", "SIGINFO", "SIGUSR1", "SIGUSR2" };
 
 pid_t waitpid(pid_t pid, int *status, int options)
 {
-    NOT_IMPLEMENTED("waitpid"); 
+    if (!status || (options & ~WNOHANG))
+        die("unimplemented variant of waitpid: pid %d, status %d, options %d", pid, status != 0, options);
+
+    // TODO: Ignore waits most or all of the time
+    pid_t ret = real_waitpid(pid, status, options);
+
+    if (ret < 0) {
+        if ((options & WNOHANG) && errno == ECHILD)
+            return ret;
+        die("waitpid failed: %s", strerror(errno));
+    }
+    else if (status) {
+        // !(options & WUNTRACED), so process either exited or caught a signal
+        if (WIFSIGNALED(*status)) {
+            int signal = WTERMSIG(*status);
+            die("waitpid: child caught signal %s (%d)", signals[signal], signal);
+        }
+        else if (!WIFEXITED(*status))
+            die("waitpid: confused?");
+        else if (WEXITSTATUS(*status))
+            die("waitpid: child exited with status %d", WEXITSTATUS(*status));
+    }
+    return ret;
+}
+
+pid_t wait(int *status)
+{
+    return waitpid(-1, status, 0);
 }
 
 #ifdef __linux__
-int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options) 
+int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options)
 {
-    NOT_IMPLEMENTED("waitid"); 
+    NOT_IMPLEMENTED("waitid");
 }
 #endif
 
 pid_t wait3(int *status, int options, struct rusage *rusage)
 {
-    NOT_IMPLEMENTED("wait3"); 
+    NOT_IMPLEMENTED("wait3");
 }
 
 pid_t wait4(pid_t pid, int *status, int options, struct rusage *rusage)
 {
-    NOT_IMPLEMENTED("wait4"); 
+    NOT_IMPLEMENTED("wait4");
 }
 
 void _exit(int status)
 {
-    NOT_IMPLEMENTED("_exit");
+    action_exit(status);
+    real__exit(status);
 }
 
 void _Exit(int status)
@@ -509,7 +734,11 @@ void _Exit(int status)
 
 void exit(int status)
 {
-    NOT_IMPLEMENTED("exit");
+    action_exit(status);
+    // TODO: calling exit assumes that atexit functions don't play tricks on us.
+    // An alternative would be to call through to _exit instead.  Better yet,
+    // we could intercept atexit and tmpfile and die or store the information.
+    real_exit(status);
 }
 
 #ifdef __APPLE__
@@ -536,6 +765,12 @@ FILE *fopen_darwin(const char *path, const char *mode)
     NOT_IMPLEMENTED("fopen_darwin");
 }
 
-#pragma GCC visibility pop
+int fcntl_darwin(int fd, int cmd, long extra) DARWIN_ALIAS(fcntl);
+int fcntl_darwin(int fd, int cmd, long extra)
+{
+    NOT_IMPLEMENTED("fcntl_darwin");
+}
 
 #endif
+
+#pragma GCC visibility pop

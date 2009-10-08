@@ -4,6 +4,7 @@
 #define __action_h__
 
 #include "fd_map.h"
+#include <sys/types.h>
 
 /*
  * This file is an abstracted model of the system calls of a process.
@@ -28,18 +29,24 @@
 int action_lstat(const char *path);
 
 // Start reading a file.  Returns false if the file doesn't exist.
-int action_open_read(const char *path);
+int action_open_read(const char *path, const struct hash *path_hash);
 
 // Finish reading a file.  If the file failed to open, info is NULL.
-void action_close_read(struct fd_info *info);
+void action_close_read(int fd);
 
 // Start writing a file.
-void action_open_write(const char *path);
+void action_open_write(const char *path, const struct hash *path_hash);
 
 // Finish writing a file.  If the file failed to open, info is NULL.
-void action_close_write(struct fd_info *info);
+void action_close_write(int fd);
+
+// Fork.  Unlike most action calls, action_fork calls real_fork internally.
+pid_t action_fork(void);
 
 // Exec.
-void action_execve(const char *path, char *const argv[], char *const envp[]);
+void action_execve(const char *path, const char *const argv[], const char *const envp[]);
+
+// Exit.
+void action_exit(int status);
 
 #endif

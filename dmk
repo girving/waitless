@@ -4,10 +4,11 @@
 cd `dirname $0`
 
 CC=gcc
-CFLAGS='-O2 -Wall -Werror -fvisibility=hidden'
+CFLAGS='-O2 -Wall -Werror -fvisibility=hidden -pipe'
 PREFIX=`/bin/pwd`
+UNAME=`uname`
 
-if [ `uname` == "Darwin" ]; then
+if [ "$UNAME" == "Darwin" ]; then
     SO=dylib
     SED=gsed
 else
@@ -19,23 +20,24 @@ run () { echo $*; $*; }
 compile () { run $CC $CFLAGS $*; }
 link () { run $CC $*; }
 
-if [ $1 == "clean" ]; then
-    run rm -f *.o *.$SO waitless config.h hacked-stat.h
+if [ "$1" == "clean" ]; then
+    run rm -f *.o *.$SO waitless config.h hacked-*.h
     exit
 fi
 
 echo "#define PREFIX \"$PREFIX\"" > config.h
 
-if [ `uname` == "Darwin" ]; then
+if [ "$UNAME" == "Darwin" ]; then
     # Mac OS X doesn't provide bits/stat.h, so we have to make one by ourselves
     # by removing the system call signatures from sys/stat.h.  Conveniently,
     # there's a __BEGIN_DECLS/__END_DECLS block around exactly these for C++
     # compatibility, so all we have to do is torch that block:
     sed 's/__BEGIN_DECLS/#if 0/;s/__END_DECLS/#endif/' /usr/include/sys/stat.h > hacked-stat.h
+    sed 's/__BEGIN_DECLS/#if 0/;s/__END_DECLS/#endif/' /usr/include/sys/wait.h > hacked-wait.h
 fi
 
 # Build object files
-CORE='util action fd_map state shared_map hash skein skein_block'
+CORE='util env action fd_map shared_map hash skein skein_block snapshot subgraph stat_cache inverse_map search_path process'
 for src in waitless stubs $CORE; do
     compile -c $src.c
 done
@@ -49,6 +51,12 @@ compile -o waitless waitless.o real_call-bin.o $COREO
 compile -c -DPRELOAD=1 real_call.c -o real_call-lib.o
 link -shared -o libwaitless.$SO stubs.o real_call-lib.o $COREO
 
+# Build standalone skein program
+compile -c skein_file.c
+link -o skein skein_file.o util.o real_call-bin.o hash.o skein.o skein_block.o
+
 # Build a test program
-compile -c tests/read.c -o tests/read.o
-link -o tests/read tests/read.o
+for t in read stat; do
+    compile -c tests/$t.c -o tests/$t.o
+    link -o tests/$t tests/$t.o
+done

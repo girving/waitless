@@ -3,6 +3,8 @@
 *.dylib
 config.h
 waitless
-hacked-stat.h
+hacked-*.h
 tests/read
+tests/stat
 tests/*.tmp
+skein

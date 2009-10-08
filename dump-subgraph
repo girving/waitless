@@ -1,0 +1,2 @@
+#!/bin/bash
+hexdump -e '16/1 "%02x" " " 1/4 "%d" " " 16/1 "%02x" "\n"' ~/.waitless/subgraph

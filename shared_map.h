@@ -6,14 +6,13 @@
 #include "hash.h"
 
 // A shared map maps a hash value to a fixed size data structure.
-// Each map is stored in $WAITLESS_DIR/$NAME and is shared between
-// all waitless children processes via mmap.  The memory layout of
-// the file is
+// Each map is stored in $WAITLESS_DIR/<name> and is shared between
+// all waitless children processes via mmap.  A shared map consists of
+// a series of fixed size (hash, entry) arranged in hash order.  Our keys
+// are already cryptographic hashes so further hashing is unnecessary.
 //
-//  struct shared_map_file
-//  {
-//      int lock; // TODO:
-
+// TODO: add locking
+//
 // TODO: I'm currently assuming that munmap is unnecessary since it happens
 // automatically on exit.
 
@@ -48,8 +47,13 @@ extern void shared_map_lock(struct shared_map *map);
 extern void shared_map_unlock(struct shared_map *map);
 
 // Look up a key in a shared_map.  If the entry doesn't exist, shared_map_lookup
-// returns false and wll create the entry iff create.  If the entry exists or
-// was created, value is updated to point to it.  The value is mutable.
+// returns false and will create the entry iff create.  If the entry exists or
+// was created, value is updated to point to it.  The value is mutable.  Freshly
+// created values are zero initialized.
 extern int shared_map_lookup(struct shared_map *map, const struct hash *key, void **value, int create);
+
+// Iterate over the entries of a shared_map, stopping if the iteration function
+// has a nonzero result (and returning that value if so).
+extern int shared_map_iter(struct shared_map *map, int (*f)(const struct hash *key, void *value));
 
 #endif
