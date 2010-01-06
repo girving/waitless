@@ -166,6 +166,12 @@ int main(int argc, char **argv)
     setenv("DYLD_FORCE_FLAT_NAMESPACE", "1", 1);
 #endif
 
+    // Replace stdin with /dev/null (waitless processes should not be interactive)
+    int null = real_open("/dev/null", O_RDONLY, 0);
+    if (real_dup2(null, STDIN_FILENO) < 0)
+        die("failed to open /dev/null");
+    real_close(null);
+
     // Find the correct absolute path to exec
     char buffer[PATH_MAX];
     const char *path = search_path(buffer, cmd[0], 0);
@@ -184,7 +190,6 @@ int main(int argc, char **argv)
         // Create the root exec node and then exec
         extern const char **environ;
         action_execve(path, cmd, environ);
-        real_execve(path, cmd, environ);
         die("failed to exec %s: ", cmd[0], strerror(errno));
     }
 

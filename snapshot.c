@@ -10,7 +10,7 @@
 #include <errno.h>
 
 // TODO: Rethink default counts and make them resizable
-struct shared_map snapshot = { "snapshot.XXXXXXX", sizeof(struct snapshot_entry), 1<<10 };
+struct shared_map snapshot = { "snapshot.XXXXXXX", sizeof(struct snapshot_entry), 1<<15 };
 
 // TODO: thread safety
 void snapshot_init()
@@ -81,6 +81,8 @@ static int dump_helper(const struct hash *name, void *value)
         p += strlcpy(p, ", writing", SPACE());
     if (entry->written)
         p += strlcpy(p, ", written", SPACE());
+    if (entry->stat)
+        p += strlcpy(p, ", stat", SPACE());
     if (entry->read)
         p += strlcpy(p, ", read", SPACE());
     *p++ = '\n';

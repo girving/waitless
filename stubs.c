@@ -108,7 +108,7 @@
  *
  *    plus their libc equivalents:
  *
- *        fopen, fdopen, freopen, fclose, fcloseall
+ *        fopen, freopen, fclose, fcloseall
  *
  *    We _do not_ track calls which read or write data through file
  *    descriptors (or use fstat to grab information about them)  Instead, we
@@ -229,6 +229,7 @@
  * 13. TODO: temporary file creation:
  *
  *         mkdtemp, mkstemps, mkstemp, mktemp
+ *         tmpfile, tmpnam, tempnam
  *
  * 14. TODO: SYSV shared memory.  Processes potentially linked by shared memory
  *     segments should have their subgraph nodes interleaved.
@@ -352,10 +353,7 @@ FILE *fopen(const char *path, const char *mode)
     return file;
 }
 
-FILE *fdopen(int fd, const char *mode)
-{
-    NOT_IMPLEMENTED("fdopen");
-}
+// Note: We do not need to intercept fdopen since we only track file descriptors
 
 FILE *freopen(const char *path, const char *mode, FILE *stream)
 {
@@ -383,6 +381,8 @@ FILE *freopen(const char *path, const char *mode, FILE *stream)
  */
 int close(int fd)
 {
+    wlog("close(%d)", fd);
+
     struct fd_info *info = 0;
     if (!inside_libc) {
         info = fd_map_find(fd);
@@ -408,7 +408,7 @@ int fclose(FILE *stream)
     int fd = fileno(stream);
     struct fd_info *info = fd_map_find(fileno(stream));
     if (info) {
-        if (info->count == 1) {
+        if (info->count == 1 && !(info->flags & WO_PIPE)) {
             if (info->flags & O_WRONLY) {
                 if (fflush(stream) < 0)
                     die("fflush failed: %s", strerror(errno));
@@ -475,12 +475,15 @@ int dup2(int fd, int fd2)
     // Call the close stub to avoid duplicating action logic.  This produces
     // different behavior in the case where fd is not active.
     close(fd2);
+    fd_map_dump();
 
     wlog("dup2(%d, %d)", fd, fd2);
     int ret = real_dup2(fd, fd2);
 
-    if (ret > 0)
+    if (ret >= 0)
         fd_map_dup2(fd, fd2);
+
+    fd_map_dump();
 
     return ret;
 }
@@ -580,8 +583,8 @@ pid_t vfork(void)
 
 int execve(const char *path, const char *const argv[], char *const envp[])
 {
-    action_execve(path, argv, (const char* const*)envp);
-    return real_execve(path, argv, (const char* const*)envp);
+    // action_execve calls real_execve internally
+    return action_execve(path, argv, (const char* const*)envp);
 }
 
 #define MAX_ARGS 32
@@ -689,12 +692,12 @@ pid_t waitpid(pid_t pid, int *status, int options)
         // !(options & WUNTRACED), so process either exited or caught a signal
         if (WIFSIGNALED(*status)) {
             int signal = WTERMSIG(*status);
-            die("waitpid: child caught signal %s (%d)", signals[signal], signal);
+            die("waitpid: child %d caught signal %s (%d)", ret, signals[signal], signal);
         }
         else if (!WIFEXITED(*status))
             die("waitpid: confused?");
         else if (WEXITSTATUS(*status))
-            die("waitpid: child exited with status %d", WEXITSTATUS(*status));
+            die("waitpid: child %d exited with status %d", ret, WEXITSTATUS(*status));
     }
     return ret;
 }
@@ -740,6 +743,8 @@ void exit(int status)
     // we could intercept atexit and tmpfile and die or store the information.
     real_exit(status);
 }
+
+// TODO: mkdtemp, mkstemps, mkstemp, mktemp, tmpfile, tmpnam, tempnam
 
 #ifdef __APPLE__
 

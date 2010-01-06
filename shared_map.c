@@ -68,6 +68,8 @@ int shared_map_lookup(struct shared_map *map, const struct hash *key, void **val
 {
     if (!map->lock_held)
         die("called shared_map_lookup without lock");
+    if (!map->count)
+        die("shared_map_lookup called before init");
 
     // Use the first few bytes of the hash key mod count as the index.  key is a
     // cryptographic hash, so the first few bytes are a good hash index.  We use
@@ -76,6 +78,7 @@ int shared_map_lookup(struct shared_map *map, const struct hash *key, void **val
     uint32_t index = *(uint32_t*)key % map->count;
 
     // Use linear chaining to find either key or the next free entry
+    uint32_t count = 0;
     for (;;) {
         struct entry *entry = map->addr + map->entry_size * index;
         if (hash_is_null(&entry->key)) {
@@ -91,6 +94,9 @@ int shared_map_lookup(struct shared_map *map, const struct hash *key, void **val
             return 1;
         }
         index = (index + 1) % map->count; 
+        count++;
+        if (++count == map->count)
+            die("shared_map %s filled with %d entries", map->name, count);
     }
 }
 

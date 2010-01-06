@@ -13,6 +13,7 @@
 struct snapshot_entry
 {
     // What's being/been done to this file
+    unsigned stat : 1;
     unsigned read : 1;
     unsigned written : 1;
     unsigned writing : 1;

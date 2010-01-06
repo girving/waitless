@@ -29,8 +29,11 @@ static inline void spin_lock(spinlock_t *s)
     // meaning that we now own the lock.
     unsigned int counter = 0;
     while (xchg(&s->lock, 1)) {
-        if (counter++ == 50000000)
-            die("spun out 0x%x", s);
+        if (counter++ == 50000000) {
+            write_backtrace();
+            wlog("spun out 0x%x", s);
+            counter = 0;
+        }
     }
     //wlog("lock   0x%x", s);
 }

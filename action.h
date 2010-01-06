@@ -40,11 +40,11 @@ void action_open_write(const char *path, const struct hash *path_hash);
 // Finish writing a file.  If the file failed to open, info is NULL.
 void action_close_write(int fd);
 
-// Fork.  Unlike most action calls, action_fork calls real_fork internally.
+// Fork.  action_fork calls real_fork internally.
 pid_t action_fork(void);
 
-// Exec.
-void action_execve(const char *path, const char *const argv[], const char *const envp[]);
+// Exec.  action_execve calls real_execve internally.
+int action_execve(const char *path, const char *const argv[], const char *const envp[]);
 
 // Exit.
 void action_exit(int status);

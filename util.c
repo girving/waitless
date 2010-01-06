@@ -16,16 +16,17 @@ void fdprintf(int fd, const char *format, ...)
     va_end(ap);
 }
 
-static void write_backtrace()
+void write_backtrace()
 {
     void *stack[20];
     int count = backtrace(stack, 20);
     char **strings = backtrace_symbols(stack, count);
-    write_str(STDERR_FILENO, "stack trace:\n");
+    fdprintf(STDERR_FILENO, "stack trace %d:\n", getpid());
     int i;
     for (i = 0; i < count; i++)
         fdprintf(STDERR_FILENO, "  %s\n", strings[i]);
-    // Skip freeing strings since we're about to die anyways
+    void free(void*);
+    free(strings);
 }
 
 void (*at_die)();
@@ -94,7 +95,7 @@ const char *path_join(const char *first, const char *second)
     // Strip ./ from second and cancel ../ prefixes with components of first
     for (;;) {
         if (second[0] == '/') {
-            // remove a redundant /' character
+            // remove a redundant / character
             second++; 
             n2--;
         }
@@ -127,4 +128,3 @@ const char *path_join(const char *first, const char *second)
     result[n1+1+n2] = 0;
     return result;
 }
-

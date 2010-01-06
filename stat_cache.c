@@ -19,7 +19,7 @@ struct stat_cache_entry
 };
 
 // TODO: Rethink default counts and make them resizable
-static struct shared_map stat_cache = { "stat_cache", sizeof(struct stat_cache_entry), 1<<10 };
+static struct shared_map stat_cache = { "stat_cache", sizeof(struct stat_cache_entry), 1<<15 };
 
 static const char *stat_cache_path()
 {

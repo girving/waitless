@@ -13,6 +13,9 @@
 #include "process.h"
 #include <stdlib.h>
 
+// Special case hack flags
+#define HACK_SKIP_O_STAT 1
+
 static void add_parent(struct process *process, const struct hash *parent)
 {
     struct parents *parents = &process->parents;
@@ -34,6 +37,7 @@ static void new_node(struct process *process, enum action_type type, const struc
     char buffer[SHOW_HASH_SIZE*parents->n + 3 + SHOW_HASH_SIZE + 1 + SHOW_NODE_SIZE];
     char *p = buffer;
     if (is_verbose()) {
+        p += snprintf(p, sizeof(buffer), "%d: ", getpid());
         int i;
         for (i = 0; i < parents->n; i++) {
             p = show_hash(p, 8, parents->p+i);
@@ -66,7 +70,19 @@ static void new_node(struct process *process, enum action_type type, const struc
  */
 int action_lstat(const char *path)
 {
-    struct process *process = lock_master_process();
+    // Not all programs access files in a correct acyclic order.
+    // In particular, GNU as stats its output .o file before writing
+    // it.  To fix this flaw, we lie to GNU as and pretend the file
+    // is never there when statted.
+    // TODO: This mechanism should be generalized and moved into a user
+    // customizable file.
+    struct process *process = process_info();
+    if ((process->flags & HACK_SKIP_O_STAT) && endswith(path, ".o")) {
+        wlog("skipping stat(\"%s\")", path);
+        return 0;
+    }
+
+    process = lock_master_process();
 
     // Add a stat node to the subgraph
     struct hash path_hash;
@@ -75,8 +91,9 @@ int action_lstat(const char *path)
 
     // Check existence and update snapshot
     struct hash exists_hash;
-    snapshot_update(&exists_hash, path, &path_hash, 0);
+    struct snapshot_entry *entry = snapshot_update(&exists_hash, path, &path_hash, 0);
     // No need to check for writers; if the file is being written, it must exist
+    entry->stat = 1;
     shared_map_unlock(&snapshot);
 
     add_parent(process, &exists_hash);
@@ -145,11 +162,14 @@ void action_close_read(int fd)
 void action_open_write(const char *path, const struct hash *path_hash)
 {
     wlog("action_open_write(%s)", path);
+    snapshot_init();
     shared_map_lock(&snapshot);
     struct snapshot_entry *entry;
     if (shared_map_lookup(&snapshot, path_hash, (void**)&entry, 1)) {
         if (entry->read)
             die("can't write '%s': it has already been read", path);
+        else if (entry->stat)
+            die("can't write '%s': it has already been statted", path);
         else if (entry->written)
             die("can't write '%s': it has already been written", path);
         else if (entry->writing)
@@ -205,73 +225,86 @@ void action_close_write(int fd)
  */
 pid_t action_fork(void)
 {
-    // Analyze open file descriptors
+    // Lock both parent (self) and master
     struct process *process = lock_process();
+    struct process *master = process->master ? find_process_info(process->master) : process;
+    if (process != master)
+        spin_lock(&master->lock);
+
+    // Save mutable information about process
+    struct fd_map fds = process->fds;
+    int flags = process->flags;
+
+    // Analyze open file descriptors
     int linked = 0, fd;
     for (fd = 0; fd < MAX_FDS; fd++) {
-        int slot = process->fds.map[fd];
+        int slot = fds.map[fd];
         if (slot) {
-            struct fd_info *info = process->fds.info + slot;
+            struct fd_info *info = fds.info + slot;
             if (info->flags & WO_PIPE) {
                 wlog("fork: fd %d as pipe", fd);
                 linked = 1;
             }
             else if (info->flags & O_WRONLY)
+                // TODO: Enforce that files aren't written by more than
+                // one process.  This requires tracking writes, etc.
                 wlog("fork: fd %d open for write", fd);
             else
+                // TODO: Link processes that share open read descriptors, or
+                // possibly create duplicate read nodes for more precision.
                 wlog("fork: fd %d open for read", fd);
         }
     }
-    unlock_process();
 
     struct hash zero_hash, one_hash;
     memset(&zero_hash, 0, sizeof(struct hash));
     memset(&one_hash, -1, sizeof(struct hash));
 
-    process = lock_master_process();
-
     // Add a fork node to the subgraph
-    new_node(process, SG_FORK, linked ? &zero_hash : &zero_hash);
+    new_node(master, SG_FORK, linked ? &zero_hash : &zero_hash);
+    struct hash fork_node = master->parents.p[0];
     wlog("fork: linked %d", linked);
-
-    if (linked)
-        unlock_master_process();
 
     // Actually fork
     pid_t pid = real_fork();
     if (pid < 0)
         die("action_fork: fork failed: %s", strerror(errno));
 
-    // At this point we consider the master lock owned by the child
-
     if (!pid) {
         struct process *child = new_process_info();
+        child->flags = flags;
         if (linked) {
-            wlog("linking %d to %d", child->pid, process->pid);
-            child->master = process->pid;
+            wlog("linking to %d", master->pid);
+            child->master = master->pid;
         }
         else {
+            wlog("child of %d (master %d)", process->pid, master->pid);
             // Inherit from fork node and zero
-            add_parent(child, process->parents.p);
+            add_parent(child, &fork_node);
             add_parent(child, &zero_hash);
             wlog("fresh process: master 0x%x", child->master);
         }
         // Copy fd_map information to child
-        memcpy(&child->fds, &process->fds, sizeof(struct fd_map));
+        memcpy(&child->fds, &fds, sizeof(struct fd_map));
         // Drop fds with close-on-exec set
         int fd;
         for (fd = 0; fd < MAX_FDS; fd++)
             if (child->fds.cloexec[fd])
                 child->fds.map[fd] = 0;
-        // Unlock both child and master
         unlock_process();
-        spin_unlock(&process->lock);
     }
-    else if (!linked) {
-        // Add a one parent node to the parent
-        add_parent(process, &one_hash);
-        unlock_master_process();
+    else {
+        if (!linked) {
+            // Add a one parent node to the parent
+            add_parent(master, &one_hash);
+        }
+        // Unlock both parent (self) and master
+        if (process->master)
+            spin_unlock(&master->lock);
+        unlock_process();
     }
+
+    fd_map_dump();
 
     return pid;
 }
@@ -291,7 +324,7 @@ pid_t action_fork(void)
  * case the child _does_ descend directly from the exec node, an explicit
  * record of argv and envp would be redundant.
  */
-void action_execve(const char *path, const char *const argv[], const char *const envp[])
+int action_execve(const char *path, const char *const argv[], const char *const envp[])
 {
     fd_map_dump();
     struct process *process = lock_master_process();
@@ -302,6 +335,7 @@ void action_execve(const char *path, const char *const argv[], const char *const
     //     char path[];
     //     uint32_t argc;
     //     char argv[argc][];
+    //     char is_pipe;
     //     uint32_t envc;
     //     char envp[envc][];
     //     char cwd[];
@@ -317,21 +351,20 @@ void action_execve(const char *path, const char *const argv[], const char *const
     for (i = 0; argv[i]; i++)
         ADD_STR(argv[i]);
     memcpy(cp, &i, sizeof(uint32_t));
-    if (!linked) {
-        // encode envp, and pwd only in the nonshared case
-        char *cp = p;
-        cp = p;
-        p += sizeof(uint32_t); // skip 4 bytes for len(envp)
-        uint32_t count;
-        for (i = 0; envp[i]; i++)
-            if (!startswith(envp[i], "WAITLESS")) {
-                ADD_STR(envp[i]);
-                count++;
-            }
-        memcpy(cp, &count, sizeof(uint32_t));
-        if (!real_getcwd(p, data+sizeof(data)-p))
-            die("action_execve: getcwd failed: %s", strerror(errno));
-    }
+    *p++ = linked;
+    // encode envp
+    cp = p;
+    p += sizeof(uint32_t); // skip 4 bytes for len(envp)
+    uint32_t count;
+    for (i = 0; envp[i]; i++)
+        if (!startswith(envp[i], "WAITLESS")) {
+            ADD_STR(envp[i]);
+            count++;
+        }
+    memcpy(cp, &count, sizeof(uint32_t));
+    // encode pwd
+    if (!real_getcwd(p, data+sizeof(data)-p))
+        die("action_execve: getcwd failed: %s", strerror(errno));
     int n = p - data + strlen(p) + 1;
 #undef ADD_STR
 
@@ -362,6 +395,32 @@ void action_execve(const char *path, const char *const argv[], const char *const
     }
 
     unlock_master_process();
+
+    // Update process flags
+    process = lock_process();
+    int old_flags = process->flags;
+    process->flags = 0;
+    p = rindex(path, '/');
+    const char *name = p ? p+1 : path;
+    if (!strcmp(name, "as"))
+        process->flags |= HACK_SKIP_O_STAT;
+    else if (strstr(name, "-gcc-")) {
+        for (i = 1; argv[i]; i++)
+            if (!strcmp(argv[i], "-c")) {
+                process->flags |= HACK_SKIP_O_STAT;
+                break;
+            }
+    }
+    unlock_process();
+
+    // Do the exec
+    int ret = real_execve(path, argv, envp);
+
+    // An error must have occurred; reset flags back to old value
+    process = lock_process();
+    process->flags = old_flags;
+    unlock_process();
+    return ret;
 }
 
 void action_exit(int status)

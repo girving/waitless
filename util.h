@@ -20,6 +20,8 @@ extern void die(const char *format, ...) __attribute__((noreturn));
 extern int write_str(int fd, const char *s);
 extern void wlog(const char *format, ...);
 
+extern void write_backtrace();
+
 extern int waitall();
 
 #define NOT_IMPLEMENTED(name) \
@@ -59,6 +61,12 @@ static inline unsigned least_set_bit(unsigned x)
 static inline int startswith(const char *s, const char *prefix)
 {
     return !strncmp(s, prefix, strlen(prefix));
+}
+
+static inline int endswith(const char *s, const char *suffix)
+{
+    size_t n1 = strlen(s), n2 = strlen(suffix); 
+    return n1 >= n2 && !memcmp(s + n1 - n2, suffix, n2);
 }
 
 // Darwin doesn't have memrchr, so make one

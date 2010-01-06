@@ -82,7 +82,7 @@ void fd_map_close(int fd)
 void fd_map_dump()
 {
     struct process *process = lock_process();
-    write_str(STDERR_FILENO, "fd_map dump:\n");
+    fdprintf(STDERR_FILENO, "fd_map dump %d:\n", process->pid);
     int fd;
     for (fd = 0; fd < MAX_FDS; fd++) {
         int slot = process->fds.map[fd];
@@ -93,8 +93,8 @@ void fd_map_dump()
                 strcpy(buffer, "<pipe>");
             else
                 inverse_hash_string(&info->path_hash, buffer, sizeof(buffer));
-            fdprintf(STDERR_FILENO, "  %d: %s, count %d, flags w%d p%d\n",
-                fd, buffer, info->count, (info->flags & O_WRONLY) != 0, (info->flags & WO_PIPE) != 0);
+            fdprintf(STDERR_FILENO, "  %d: %s, count %d, flags w%d c%d\n",
+                fd, buffer, info->count, (info->flags & O_WRONLY) != 0, process->fds.cloexec[fd]);
         }
     }
     unlock_process();

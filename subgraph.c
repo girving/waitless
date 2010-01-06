@@ -13,7 +13,7 @@ struct subgraph_entry {
 };
 
 // TODO: Rethink default counts and make them resizable
-static struct shared_map subgraph = { "subgraph", sizeof(struct subgraph_entry), 1<<10 };
+static struct shared_map subgraph = { "subgraph", sizeof(struct subgraph_entry), 1<<15 };
 
 static const char *subgraph_path()
 {
@@ -87,7 +87,8 @@ char *show_subgraph_node(char s[SHOW_NODE_SIZE], enum action_type type, const st
                 p += c; q += c + 1;
             }
             // Finish up, noting whether we're connected via a pipe
-            p += strlcpy(p, *q ? "\")" : "\", <pipe>)", s+SHOW_NODE_SIZE-p);
+            int linked = *q++;
+            p += strlcpy(p, linked ? "\", <pipe>)" : "\")", s+SHOW_NODE_SIZE-p);
             n = p - s;
             break;
         }

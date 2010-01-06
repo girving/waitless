@@ -33,6 +33,9 @@ struct process
     pid_t pid;
     spinlock_t lock;
 
+    // Flags for tweaking process behavior
+    int flags;
+
     // If processes are linked by a pipe, subgraph nodes from both processes
     // are interleaved into the process info of the master.
     pid_t master;
